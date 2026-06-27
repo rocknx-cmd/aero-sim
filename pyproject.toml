@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aero-sim"
+version = "0.1.0"
+description = "3D aerodynamics simulation and visualization for variable objects"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "pyvista>=0.43",
+  "trimesh>=4.0",
+  "rtree>=1.2",
+  "pyyaml>=6.0",
+  "matplotlib>=3.8",
+  "click>=8.1",
+]
+
+[project.scripts]
+aero-sim = "aero_sim.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,27 @@
+name: box-demo
+
+object:
+  kind: box
+  scale: 1.0
+  params:
+    width: 1.5
+    depth: 0.8
+    height: 1.0
+
+flow:
+  speed: 12.0
+  direction: [1.0, 0.2, 0.0]
+  density: 1.225
+  viscosity: 1.81e-5
+
+grid:
+  resolution: 48
+  padding: 0.7
+
+viz:
+  surface_colormap: jet
+  vector_density: 12
+  show_streamlines: true
+  screenshot: output/box-demo.png
+
+output_dir: output

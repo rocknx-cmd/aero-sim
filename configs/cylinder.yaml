@@ -1,0 +1,22 @@
+name: cylinder-demo
+
+object:
+  kind: cylinder
+  scale: 1.0
+  params:
+    radius: 0.5
+    height: 2.0
+
+flow:
+  speed: 8.0
+  direction: [1.0, 0.0, 0.0]
+
+grid:
+  resolution: 48
+  padding: 0.6
+
+viz:
+  vector_density: 10
+  screenshot: output/cylinder-demo.png
+
+output_dir: output

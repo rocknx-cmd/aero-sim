@@ -1,0 +1,26 @@
+name: sphere-demo
+
+object:
+  kind: sphere
+  scale: 1.0
+  params:
+    radius: 1.0
+
+flow:
+  speed: 10.0
+  direction: [1.0, 0.0, 0.0]
+  density: 1.225
+  viscosity: 1.81e-5
+
+grid:
+  resolution: 48
+  padding: 0.6
+
+viz:
+  surface_colormap: jet
+  vector_density: 10
+  show_streamlines: true
+  background: white
+  screenshot: output/sphere-demo.png
+
+output_dir: output
