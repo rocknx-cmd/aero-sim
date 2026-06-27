@@ -5,7 +5,7 @@ object:
   path: models/nasa/x57.glb
   center: true
   target_size: 4.0
-  max_faces: 50000
+  max_faces: 20000
   rotation: [0, 0, 0]
 
 flow:
@@ -13,11 +13,11 @@ flow:
   direction: [1.0, 0.0, 0.0]
 
 grid:
-  resolution: 36
+  resolution: 24
   padding: 0.8
 
 viz:
-  vector_density: 18
+  vector_density: 16
   arrow_size: 0.016
   near_field_layers: 3
   near_field_depth: 0.22

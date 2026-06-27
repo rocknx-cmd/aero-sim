@@ -58,6 +58,7 @@ def build_mesh(config: ObjectConfig) -> trimesh.Trimesh:
     if config.max_faces is not None and len(mesh.faces) > config.max_faces:
         mesh = _decimate_mesh(mesh, config.max_faces)
 
+    mesh = _remove_degenerate_faces(mesh)
     mesh = _repair_mesh(mesh)
     try:
         mesh.process(validate=False)
@@ -278,6 +279,20 @@ def _normalize_size(mesh: trimesh.Trimesh, target_size: float) -> trimesh.Trimes
     if span <= 0:
         return mesh
     mesh.apply_scale(target_size / span)
+    return mesh
+
+
+def _remove_degenerate_faces(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Drop zero-area triangles that break ray tests and normal lookups."""
+    if len(mesh.faces) == 0:
+        return mesh
+    areas = mesh.area_faces
+    keep = areas > 1e-10
+    if np.all(keep):
+        return mesh
+    mesh = mesh.copy()
+    mesh.update_faces(keep)
+    mesh.remove_unreferenced_vertices()
     return mesh
 
 

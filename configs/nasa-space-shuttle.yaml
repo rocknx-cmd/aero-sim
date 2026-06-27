@@ -5,14 +5,14 @@ object:
   path: models/nasa/space-shuttle.glb
   center: true
   target_size: 5.0
-  max_faces: 50000
+  max_faces: 30000
 
 flow:
   speed: 20.0
   direction: [1.0, 0.0, 0.0]
 
 grid:
-  resolution: 36
+  resolution: 28
   padding: 0.8
 
 viz:

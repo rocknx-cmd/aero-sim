@@ -148,7 +148,7 @@ def _solve_potential_flow(
     re = flow.density * flow.speed * char_length / flow.viscosity
 
     surface_velocity = _sample_velocity(
-        mesh, mesh.vertices, velocity, origin, spacing, shape, fluid
+        mesh, mesh.vertices, velocity, origin, spacing, shape, fluid, u_inf
     )
     speed_ratio = np.clip(np.linalg.norm(surface_velocity, axis=1) / flow.speed, 0.0, 3.0)
     surface_cp = 1.0 - speed_ratio**2
@@ -176,46 +176,68 @@ def _sample_velocity(
     spacing: float,
     shape: np.ndarray,
     fluid: np.ndarray,
+    u_inf: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Trilinear interpolation of the velocity field at arbitrary points."""
+    """Trilinear interpolation of the velocity field at arbitrary points (vectorized)."""
+    import trimesh.proximity as proximity
+
+    points = np.asarray(points, dtype=float)
+    if len(points) == 0:
+        return np.empty((0, 3))
+
+    fallback = _normalize(u_inf) if u_inf is not None else np.array([1.0, 0.0, 0.0])
     nx, ny, nz, _ = velocity.shape
-    sampled = np.zeros((len(points), 3), dtype=float)
 
-    for idx, point in enumerate(points):
-        # Offset slightly into the fluid to avoid boundary artifacts
-        offset_point = point + 1.5 * spacing * _outward_normal(mesh, point)
-        rel = (offset_point - origin) / spacing
-        base = np.floor(rel).astype(int)
-        frac = rel - base
+    _, _, face_ids = proximity.closest_point(mesh, points)
+    normals = mesh.face_normals[face_ids].astype(float, copy=True)
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    norms[norms < 1e-12] = 1.0
+    normals /= norms
 
-        if np.any(base < 0) or base[0] >= nx - 1 or base[1] >= ny - 1 or base[2] >= nz - 1:
-            sampled[idx] = np.array([1.0, 0.0, 0.0])
-            continue
+    offset_points = points + 1.5 * spacing * normals
+    rel = (offset_points - origin) / spacing
+    np.nan_to_num(rel, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    base = np.floor(rel).astype(np.int64)
+    frac = rel - base
 
-        i, j, k = base
-        if not fluid[i, j, k]:
-            # Walk outward to nearest fluid cell for robust surface sampling
-            sampled[idx] = _nearest_fluid_velocity(point, velocity, origin, spacing, shape, fluid)
-            continue
+    sampled = np.tile(fallback, (len(points), 1))
+    valid = (
+        (base[:, 0] >= 0)
+        & (base[:, 0] < nx - 1)
+        & (base[:, 1] >= 0)
+        & (base[:, 1] < ny - 1)
+        & (base[:, 2] >= 0)
+        & (base[:, 2] < nz - 1)
+    )
+    if not np.any(valid):
+        return sampled
 
-        i1, j1, k1 = i + 1, j + 1, k + 1
-        c000 = velocity[i, j, k]
-        c100 = velocity[i1, j, k]
-        c010 = velocity[i, j1, k]
-        c110 = velocity[i1, j1, k]
-        c001 = velocity[i, j, k1]
-        c101 = velocity[i1, j, k1]
-        c011 = velocity[i, j1, k1]
-        c111 = velocity[i1, j1, k1]
+    idx = np.where(valid)[0]
+    i, j, k = base[idx, 0], base[idx, 1], base[idx, 2]
+    tx, ty, tz = frac[idx, 0:1], frac[idx, 1:2], frac[idx, 2:3]
 
-        tx, ty, tz = frac
-        c00 = c000 * (1 - tx) + c100 * tx
-        c01 = c001 * (1 - tx) + c101 * tx
-        c10 = c010 * (1 - tx) + c110 * tx
-        c11 = c011 * (1 - tx) + c111 * tx
-        c0 = c00 * (1 - ty) + c10 * ty
-        c1 = c01 * (1 - ty) + c11 * ty
-        sampled[idx] = c0 * (1 - tz) + c1 * tz
+    c000 = velocity[i, j, k]
+    c100 = velocity[i + 1, j, k]
+    c010 = velocity[i, j + 1, k]
+    c110 = velocity[i + 1, j + 1, k]
+    c001 = velocity[i, j, k + 1]
+    c101 = velocity[i + 1, j, k + 1]
+    c011 = velocity[i, j + 1, k + 1]
+    c111 = velocity[i + 1, j + 1, k + 1]
+
+    c00 = c000 * (1 - tx) + c100 * tx
+    c01 = c001 * (1 - tx) + c101 * tx
+    c10 = c010 * (1 - tx) + c110 * tx
+    c11 = c011 * (1 - tx) + c111 * tx
+    c0 = c00 * (1 - ty) + c10 * ty
+    c1 = c01 * (1 - ty) + c11 * ty
+    sampled[idx] = c0 * (1 - tz) + c1 * tz
+
+    # Fallback where interpolation landed in blocked/solid cells
+    solid_mask = ~fluid[i, j, k]
+    if np.any(solid_mask):
+        bad = idx[solid_mask]
+        sampled[bad] = fallback
 
     return sampled
 
@@ -223,29 +245,11 @@ def _sample_velocity(
 def _outward_normal(mesh: trimesh.Trimesh, point: np.ndarray) -> np.ndarray:
     """Approximate outward normal at the nearest surface point."""
     _, _, face_id = mesh.nearest.on_surface([point])
-    normal = mesh.face_normals[int(face_id[0])]
-    return normal / np.linalg.norm(normal)
-
-
-def _nearest_fluid_velocity(
-    point: np.ndarray,
-    velocity: np.ndarray,
-    origin: np.ndarray,
-    spacing: float,
-    shape: np.ndarray,
-    fluid: np.ndarray,
-    max_radius: int = 6,
-) -> np.ndarray:
-    rel = np.round((point - origin) / spacing).astype(int)
-    for radius in range(1, max_radius + 1):
-        for di in range(-radius, radius + 1):
-            for dj in range(-radius, radius + 1):
-                for dk in range(-radius, radius + 1):
-                    i, j, k = rel + np.array([di, dj, dk])
-                    if 0 <= i < shape[0] and 0 <= j < shape[1] and 0 <= k < shape[2]:
-                        if fluid[i, j, k]:
-                            return velocity[i, j, k]
-    return np.array([1.0, 0.0, 0.0])
+    normal = mesh.face_normals[int(face_id[0])].astype(float)
+    norm = np.linalg.norm(normal)
+    if norm < 1e-12:
+        return np.array([0.0, 0.0, 1.0])
+    return normal / norm
 
 
 def solve_flow(mesh: trimesh.Trimesh, flow: FlowConfig, grid: GridConfig) -> FlowSolution:
@@ -262,4 +266,5 @@ def interpolate_velocity(solution: FlowSolution, points: np.ndarray) -> np.ndarr
         solution.grid_spacing,
         np.array(solution.grid_shape),
         solution.fluid_mask,
+        solution.u_inf,
     )
