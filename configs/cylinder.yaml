@@ -17,6 +17,6 @@ grid:
 
 viz:
   vector_density: 10
-  screenshot: output/cylinder-demo.png
+  interactive: true
 
 output_dir: output

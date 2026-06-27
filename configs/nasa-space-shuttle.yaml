@@ -1,0 +1,24 @@
+name: nasa-space-shuttle
+
+object:
+  kind: file
+  path: models/nasa/space-shuttle.glb
+  center: true
+  target_size: 5.0
+  max_faces: 50000
+
+flow:
+  speed: 20.0
+  direction: [1.0, 0.0, 0.0]
+
+grid:
+  resolution: 36
+  padding: 0.8
+
+viz:
+  vector_density: 18
+  arrow_size: 0.016
+  near_field_layers: 3
+  interactive: true
+
+output_dir: output

@@ -22,6 +22,6 @@ viz:
   surface_colormap: jet
   vector_density: 12
   show_streamlines: true
-  screenshot: output/box-demo.png
+  interactive: true
 
 output_dir: output

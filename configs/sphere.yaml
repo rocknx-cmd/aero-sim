@@ -18,9 +18,13 @@ grid:
 
 viz:
   surface_colormap: jet
-  vector_density: 10
-  show_streamlines: true
+  vector_density: 24
+  arrow_size: 0.016
+  near_field_layers: 3
+  near_field_depth: 0.22
+  show_streamlines: false
+  checker_floor: true
   background: white
-  screenshot: output/sphere-demo.png
+  interactive: true
 
 output_dir: output

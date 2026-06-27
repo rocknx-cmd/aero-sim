@@ -19,6 +19,8 @@ class FlowSolution:
     phi_field: np.ndarray  # (nx, ny, nz)
     grid_origin: np.ndarray
     grid_spacing: float
+    grid_shape: tuple[int, int, int]
+    fluid_mask: np.ndarray  # (nx, ny, nz) bool
     u_inf: np.ndarray
     surface_velocity: np.ndarray  # (n_vertices, 3)
     surface_cp: np.ndarray  # (n_vertices,)
@@ -145,8 +147,10 @@ def _solve_potential_flow(
     char_length = float(np.max(mesh.bounds[1] - mesh.bounds[0]))
     re = flow.density * flow.speed * char_length / flow.viscosity
 
-    surface_velocity = _sample_velocity(mesh.vertices, velocity, origin, spacing, shape, fluid)
-    speed_ratio = np.linalg.norm(surface_velocity, axis=1) / flow.speed
+    surface_velocity = _sample_velocity(
+        mesh, mesh.vertices, velocity, origin, spacing, shape, fluid
+    )
+    speed_ratio = np.clip(np.linalg.norm(surface_velocity, axis=1) / flow.speed, 0.0, 3.0)
     surface_cp = 1.0 - speed_ratio**2
 
     return FlowSolution(
@@ -155,6 +159,8 @@ def _solve_potential_flow(
         phi_field=phi_field,
         grid_origin=origin,
         grid_spacing=spacing,
+        grid_shape=tuple(int(s) for s in shape),
+        fluid_mask=fluid,
         u_inf=u_inf,
         surface_velocity=surface_velocity,
         surface_cp=surface_cp,
@@ -163,6 +169,7 @@ def _solve_potential_flow(
 
 
 def _sample_velocity(
+    mesh: trimesh.Trimesh,
     points: np.ndarray,
     velocity: np.ndarray,
     origin: np.ndarray,
@@ -175,7 +182,9 @@ def _sample_velocity(
     sampled = np.zeros((len(points), 3), dtype=float)
 
     for idx, point in enumerate(points):
-        rel = (point - origin) / spacing
+        # Offset slightly into the fluid to avoid boundary artifacts
+        offset_point = point + 1.5 * spacing * _outward_normal(mesh, point)
+        rel = (offset_point - origin) / spacing
         base = np.floor(rel).astype(int)
         frac = rel - base
 
@@ -211,6 +220,13 @@ def _sample_velocity(
     return sampled
 
 
+def _outward_normal(mesh: trimesh.Trimesh, point: np.ndarray) -> np.ndarray:
+    """Approximate outward normal at the nearest surface point."""
+    _, _, face_id = mesh.nearest.on_surface([point])
+    normal = mesh.face_normals[int(face_id[0])]
+    return normal / np.linalg.norm(normal)
+
+
 def _nearest_fluid_velocity(
     point: np.ndarray,
     velocity: np.ndarray,
@@ -234,3 +250,16 @@ def _nearest_fluid_velocity(
 
 def solve_flow(mesh: trimesh.Trimesh, flow: FlowConfig, grid: GridConfig) -> FlowSolution:
     return _solve_potential_flow(mesh, flow, grid)
+
+
+def interpolate_velocity(solution: FlowSolution, points: np.ndarray) -> np.ndarray:
+    """Sample the velocity field at arbitrary 3D points."""
+    return _sample_velocity(
+        solution.mesh,
+        points,
+        solution.velocity_field,
+        solution.grid_origin,
+        solution.grid_spacing,
+        np.array(solution.grid_shape),
+        solution.fluid_mask,
+    )

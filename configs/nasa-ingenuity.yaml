@@ -1,0 +1,24 @@
+name: nasa-ingenuity
+
+object:
+  kind: file
+  path: models/nasa/ingenuity-helicopter.glb
+  center: true
+  target_size: 3.0
+  max_faces: 40000
+
+flow:
+  speed: 5.0
+  direction: [1.0, 0.0, 0.0]
+
+grid:
+  resolution: 34
+  padding: 0.9
+
+viz:
+  vector_density: 16
+  arrow_size: 0.018
+  near_field_layers: 3
+  interactive: true
+
+output_dir: output

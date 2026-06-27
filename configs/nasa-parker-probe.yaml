@@ -1,0 +1,22 @@
+name: nasa-parker-probe
+
+object:
+  kind: file
+  path: models/nasa/parker-solar-probe.glb
+  center: true
+  target_size: 4.0
+  max_faces: 40000
+
+flow:
+  speed: 25.0
+  direction: [1.0, 0.0, 0.0]
+
+grid:
+  resolution: 34
+  padding: 0.8
+
+viz:
+  vector_density: 16
+  interactive: true
+
+output_dir: output

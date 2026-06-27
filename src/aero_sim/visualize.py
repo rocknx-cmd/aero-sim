@@ -5,43 +5,165 @@ from pathlib import Path
 import numpy as np
 
 from .config import VizConfig
-from .solver import FlowSolution
+from .objects import mesh_to_pyvista
+from .solver import FlowSolution, interpolate_velocity
 
 
 def render_solution(
     solution: FlowSolution,
     viz: VizConfig,
     output_path: Path | None = None,
+    save_path: Path | None = None,
 ) -> None:
     """Render cow-style aerodynamics visualization: surface Cp + velocity glyphs."""
+    screenshot = save_path or output_path
     try:
-        _render_pyvista(solution, viz, output_path)
-    except (ImportError, OSError, RuntimeError, ValueError) as exc:
-        if output_path is None:
+        _render_pyvista(
+            solution,
+            viz,
+            interactive=viz.interactive,
+            save_path=screenshot,
+        )
+    except (ImportError, OSError, RuntimeError) as exc:
+        if viz.interactive:
             raise RuntimeError(
-                "Interactive PyVista rendering is unavailable on this system. "
-                "Set viz.screenshot in the config for matplotlib fallback output."
+                "Interactive 3D viewer requires PyVista/VTK. "
+                "Install dependencies and retry, or use --no-interactive --save output.png"
             ) from exc
-        _render_matplotlib(solution, viz, output_path)
+        if screenshot is None:
+            raise RuntimeError(
+                "PyVista is unavailable. Use --save to write a matplotlib PNG instead."
+            ) from exc
+        _render_matplotlib(solution, viz, screenshot)
+    except ValueError as exc:
+        raise RuntimeError(f"Visualization error: {exc}") from exc
 
 
 def _render_pyvista(
     solution: FlowSolution,
     viz: VizConfig,
-    output_path: Path | None,
+    interactive: bool,
+    save_path: Path | None,
 ) -> None:
+    if save_path:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        off = _create_plotter(solution, viz, off_screen=True, interactive=False)
+        off.show(screenshot=str(save_path))
+        off.close()
+
+    if interactive:
+        pl = _create_plotter(solution, viz, off_screen=False, interactive=True)
+        pl.show()
+    elif not save_path:
+        pl = _create_plotter(solution, viz, off_screen=True, interactive=False)
+        pl.show()
+
+
+def _create_checker_texture(cells: int = 16, pixels_per_cell: int = 64) -> np.ndarray:
+    """Black grid lines on white — classic CFD / wind-tunnel floor look."""
+    size = cells * pixels_per_cell
+    image = np.full((size, size, 3), 255, dtype=np.uint8)
+    line = max(2, pixels_per_cell // 24)
+    for i in range(cells + 1):
+        pos = min(i * pixels_per_cell, size - 1)
+        end = min(pos + line, size)
+        image[pos:end, :, :] = 0
+        image[:, pos:end, :] = 0
+    return image
+
+
+def _add_checker_floor(pl, bounds: np.ndarray, padding: float = 1.4, cells: int = 12) -> None:
+    """Add a tiled grid floor beneath the object."""
     import pyvista as pv
 
-    from .objects import mesh_to_pyvista
+    xmin, ymin, zmin = bounds[0]
+    xmax, ymax, zmax = bounds[1]
+    span_x = max(float(xmax - xmin), 1e-6)
+    span_z = max(float(zmax - zmin), 1e-6)
+    floor_y = ymin - 0.02 * max(ymax - ymin, 1e-6)
+
+    half_x = span_x * padding / 2.0
+    half_z = span_z * padding / 2.0
+    cx = (xmin + xmax) / 2.0
+    cz = (zmin + zmax) / 2.0
+
+    x0, x1 = cx - half_x, cx + half_x
+    z0, z1 = cz - half_z, cz + half_z
+
+    points = np.array(
+        [
+            [x0, floor_y, z0],
+            [x1, floor_y, z0],
+            [x1, floor_y, z1],
+            [x0, floor_y, z1],
+        ],
+        dtype=float,
+    )
+    faces = np.array([4, 0, 1, 2, 3], dtype=np.int64)
+    floor = pv.PolyData(points, faces)
+
+    # Manual UV tiling — avoids PyVista texture_map_to_plane failures on Plane meshes
+    floor.active_texture_coordinates = np.array(
+        [[0.0, 0.0], [cells, 0.0], [cells, cells], [0.0, cells]],
+        dtype=np.float32,
+    )
+
+    texture = pv.numpy_to_texture(_create_checker_texture(cells=cells))
+    pl.add_mesh(floor, texture=texture, lighting=False, show_scalar_bar=False)
+
+
+def _center_camera(pl, bounds: np.ndarray) -> None:
+    """Point the camera at the object center with a balanced iso view."""
+    xmin, ymin, zmin = bounds[0]
+    xmax, ymax, zmax = bounds[1]
+    center = np.array([(xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2])
+    span = float(max(xmax - xmin, ymax - ymin, zmax - zmin))
+
+    pl.reset_camera(bounds=(xmin, xmax, ymin, ymax, zmin, zmax))
+    pl.camera.focal_point = center
+    pl.camera.position = center + np.array([1.4, 0.9, 1.2]) * span
+    pl.camera.up = (0.0, 1.0, 0.0)
+    pl.camera.clipping_range = (span * 0.05, span * 20.0)
+
+
+def _configure_interaction(pl) -> None:
+    """Left drag rotates; Ctrl+left drag pans focal point; scroll zooms."""
+    pl.enable_custom_trackball_style(
+        left="rotate",
+        control_left="pan",
+        shift_left="pan",
+        middle="pan",
+        right="dolly",
+    )
+
+
+def _create_plotter(
+    solution: FlowSolution,
+    viz: VizConfig,
+    off_screen: bool,
+    interactive: bool,
+) -> "pv.Plotter":
+    import pyvista as pv
 
     mesh = mesh_to_pyvista(solution.mesh)
     mesh["Cp"] = solution.surface_cp
     mesh["velocity"] = solution.surface_velocity
     mesh.set_active_scalars("Cp")
 
-    off_screen = bool(output_path and output_path.suffix.lower() in {".png", ".jpg", ".jpeg"})
-    pl = pv.Plotter(off_screen=off_screen)
+    bounds = solution.mesh.bounds
+    span = float(np.max(bounds[1] - bounds[0]))
+    arrow_len = viz.arrow_size * span
+    thin_arrow = pv.Arrow(
+        tip_length=0.35,
+        tip_radius=0.12,
+        shaft_radius=0.04,
+    )
+
+    pl = pv.Plotter(off_screen=off_screen, window_size=(1280, 900))
     pl.set_background(viz.background)
+
+    if viz.checker_floor:
+        _add_checker_floor(pl, bounds)
 
     pl.add_mesh(
         mesh,
@@ -52,39 +174,15 @@ def _render_pyvista(
         scalar_bar_args={"title": "Pressure coefficient Cp"},
     )
 
-    surface_points = mesh.points
-    vectors = solution.surface_velocity
-    magnitudes = np.linalg.norm(vectors, axis=1, keepdims=True)
-    safe = np.where(magnitudes > 0, magnitudes, 1.0)
-    unit_vectors = vectors / safe
-
-    stride = max(1, len(surface_points) // (viz.vector_density**2))
-    glyph_points = surface_points[::stride]
-    glyph_vectors = unit_vectors[::stride]
-    glyph_mags = magnitudes[::stride].ravel()
-
-    glyph_cloud = pv.PolyData(glyph_points)
-    glyph_cloud["velocity"] = glyph_vectors
-    glyph_cloud["magnitude"] = glyph_mags
-
-    span = float(np.max(solution.mesh.bounds[1] - solution.mesh.bounds[0]))
-    arrow_scale = 0.08 * span
-
-    arrows = glyph_cloud.glyph(
-        orient="velocity",
-        scale="magnitude",
-        factor=arrow_scale,
-    )
-    pl.add_mesh(arrows, color="black", opacity=0.85)
-
-    volume_glyphs = _volume_glyph_cloud(solution, density=viz.vector_density)
-    if volume_glyphs.n_points > 0:
-        vol_arrows = volume_glyphs.glyph(
+    near_field = _near_field_glyph_cloud(solution, viz)
+    if near_field.n_points > 0:
+        flow_arrows = near_field.glyph(
             orient="velocity",
-            scale="magnitude",
-            factor=0.06 * span,
+            scale=False,
+            factor=arrow_len,
+            geom=thin_arrow,
         )
-        pl.add_mesh(vol_arrows, color=[0.2, 0.2, 0.2], opacity=0.55)
+        pl.add_mesh(flow_arrows, color="black", opacity=0.92)
 
     if viz.show_streamlines:
         stream_mesh = _build_streamline_seed_mesh(solution)
@@ -92,19 +190,23 @@ def _render_pyvista(
             streamlines = stream_mesh.streamlines_from_source(
                 _streamline_source(solution),
                 vectors="velocity",
-                max_time=100.0,
+                max_length=span * 4.0,
             )
             if streamlines.n_points > 0:
-                pl.add_mesh(streamlines, color=[0.1, 0.1, 0.1], line_width=1.5, opacity=0.35)
+                pl.add_mesh(streamlines, color=[0.1, 0.1, 0.1], line_width=1.0, opacity=0.25)
 
     pl.add_axes()
-    pl.camera_position = "iso"
+    _center_camera(pl, bounds)
 
-    if output_path:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        pl.show(screenshot=str(output_path))
-    else:
-        pl.show()
+    if interactive:
+        _configure_interaction(pl)
+        pl.add_text(
+            "Drag=rotate  Ctrl+drag=pan  Scroll=zoom  q=close",
+            position="upper_left",
+            font_size=10,
+            color="black",
+        )
+    return pl
 
 
 def _render_matplotlib(
@@ -138,30 +240,26 @@ def _render_matplotlib(
     collection = Poly3DCollection(triangles, facecolors=colors, edgecolor="none", alpha=1.0)
     ax.add_collection3d(collection)
 
-    stride = max(1, len(vertices) // (viz.vector_density**2))
-    pts = vertices[::stride]
-    vecs = velocity[::stride]
-    mags = np.linalg.norm(vecs, axis=1, keepdims=True)
-    mags[mags == 0] = 1.0
-    dirs = vecs / mags
     span = float(np.max(mesh.bounds[1] - mesh.bounds[0]))
-    arrow_len = 0.06 * span
+    arrow_len = viz.arrow_size * span
 
-    ax.quiver(
-        pts[:, 0],
-        pts[:, 1],
-        pts[:, 2],
-        dirs[:, 0],
-        dirs[:, 1],
-        dirs[:, 2],
-        length=arrow_len,
-        normalize=True,
-        color="black",
-        linewidth=0.4,
-        alpha=0.85,
-    )
+    near_pts, near_dirs = _near_field_points(solution, viz)
+    if len(near_pts) > 0:
+        ax.quiver(
+            near_pts[:, 0],
+            near_pts[:, 1],
+            near_pts[:, 2],
+            near_dirs[:, 0],
+            near_dirs[:, 1],
+            near_dirs[:, 2],
+            length=arrow_len,
+            normalize=True,
+            color="black",
+            linewidth=0.25,
+            alpha=0.85,
+        )
 
-    ax.set_title("Aerodynamics — surface Cp with velocity vectors")
+    ax.set_title("Aerodynamics — surface Cp with near-field flow vectors")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
@@ -177,43 +275,64 @@ def _render_matplotlib(
     plt.close(fig)
 
 
-def _volume_glyph_cloud(solution: FlowSolution, density: int):
+def _near_field_points(solution: FlowSolution, viz: VizConfig) -> tuple[np.ndarray, np.ndarray]:
+    """Seed points in a few fluid shells upstream and alongside the body."""
+    import trimesh.proximity as proximity
+
+    mesh = solution.mesh
+    span = float(np.max(mesh.bounds[1] - mesh.bounds[0]))
+    u_hat = solution.u_inf / np.linalg.norm(solution.u_inf)
+    center = mesh.centroid
+
+    sample_count = viz.vector_density**2
+    idx = np.linspace(0, len(mesh.vertices) - 1, sample_count, dtype=int)
+    anchor_points = mesh.vertices[idx]
+
+    _, _, face_ids = proximity.closest_point(mesh, anchor_points)
+    normals = mesh.face_normals[face_ids]
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+
+    layer_fracs = np.linspace(
+        0.06,
+        viz.near_field_depth,
+        max(viz.near_field_layers, 1),
+    )
+
+    seeds: list[np.ndarray] = []
+    for frac in layer_fracs:
+        offset = frac * span
+        seeds.append(anchor_points + normals * offset)
+
+    points = np.vstack(seeds)
+    rel = points - center
+    upstream = rel @ u_hat
+    lateral = rel - np.outer(upstream, u_hat)
+    lateral_mag = np.linalg.norm(lateral, axis=1)
+    # Front + sides only — skip deep wake behind the body
+    keep = (upstream > -0.12 * span) | (lateral_mag > 0.25 * span)
+    points = points[keep]
+
+    inside = mesh.contains(points)
+    points = points[~inside]
+    if len(points) == 0:
+        return np.empty((0, 3)), np.empty((0, 3))
+
+    velocity = interpolate_velocity(solution, points)
+    speed = np.linalg.norm(velocity, axis=1, keepdims=True)
+    speed[speed == 0] = 1.0
+    directions = velocity / speed
+    return points, directions
+
+
+def _near_field_glyph_cloud(solution: FlowSolution, viz: VizConfig):
     import pyvista as pv
 
-    velocity = solution.velocity_field
-    origin = solution.grid_origin
-    spacing = solution.grid_spacing
-    nx, ny, nz, _ = velocity.shape
-
-    xs = np.linspace(0, nx - 1, density)
-    ys = np.linspace(0, ny - 1, density)
-    zs = np.linspace(0, nz - 1, density)
-
-    points: list[np.ndarray] = []
-    vectors: list[np.ndarray] = []
-    magnitudes: list[float] = []
-
-    for xi in xs:
-        for yi in ys:
-            for zi in zs:
-                i, j, k = int(xi), int(yi), int(zi)
-                vec = velocity[i, j, k]
-                mag = float(np.linalg.norm(vec))
-                if mag < 1e-8:
-                    continue
-                pos = origin + spacing * np.array([i, j, k], dtype=float)
-                if solution.mesh.contains([pos])[0]:
-                    continue
-                points.append(pos)
-                vectors.append(vec / mag)
-                magnitudes.append(mag)
-
-    if not points:
+    points, directions = _near_field_points(solution, viz)
+    if len(points) == 0:
         return pv.PolyData()
 
-    cloud = pv.PolyData(np.asarray(points))
-    cloud["velocity"] = np.asarray(vectors)
-    cloud["magnitude"] = np.asarray(magnitudes)
+    cloud = pv.PolyData(points)
+    cloud["velocity"] = directions
     return cloud
 
 

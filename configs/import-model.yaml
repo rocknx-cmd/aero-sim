@@ -1,0 +1,24 @@
+name: imported-model
+
+object:
+  kind: file
+  path: models/your-model.stl   # .stl, .obj, .glb, .ply, …
+  center: true
+  target_size: 4.0              # scale so longest axis = 4 units
+  max_faces: 50000              # simplify heavy CAD meshes (aircraft, etc.)
+  rotation: [0, 0, 0]           # degrees around X, Y, Z
+
+flow:
+  speed: 10.0
+  direction: [1.0, 0.0, 0.0]
+
+grid:
+  resolution: 40                # use 32–48 for large models; higher = slower
+  padding: 0.8
+
+viz:
+  interactive: true
+  vector_density: 10
+  show_streamlines: true
+
+output_dir: output
