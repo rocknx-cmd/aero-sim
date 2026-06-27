@@ -59,8 +59,23 @@ def build_mesh(config: ObjectConfig) -> trimesh.Trimesh:
         mesh = _decimate_mesh(mesh, config.max_faces)
 
     mesh = _repair_mesh(mesh)
-    mesh.process(validate=True)
+    try:
+        mesh.process(validate=False)
+    except Exception:
+        pass
+    _validate_mesh(mesh, config.path or kind)
     return mesh
+
+
+def _validate_mesh(mesh: trimesh.Trimesh, label: str) -> None:
+    if mesh.bounds is None or len(mesh.vertices) == 0:
+        raise ValueError(f"Mesh '{label}' is empty after loading.")
+    span = float(np.max(mesh.bounds[1] - mesh.bounds[0]))
+    if not np.isfinite(span) or span <= 0:
+        raise ValueError(
+            f"Mesh '{label}' has invalid bounds. "
+            "The file may use an unsupported compression format."
+        )
 
 
 def _load_external_mesh(path: str | None) -> trimesh.Trimesh:
@@ -77,6 +92,9 @@ def _load_external_mesh(path: str | None) -> trimesh.Trimesh:
             f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
         )
 
+    if suffix in {".glb", ".gltf"}:
+        return _load_gltf_mesh(file_path)
+
     loaded = trimesh.load(file_path, force="mesh")
     if isinstance(loaded, trimesh.Scene):
         meshes = [g for g in loaded.geometry.values() if isinstance(g, trimesh.Trimesh)]
@@ -89,6 +107,146 @@ def _load_external_mesh(path: str | None) -> trimesh.Trimesh:
         raise ValueError(f"Could not load mesh from {file_path}")
 
     return mesh
+
+
+def _load_gltf_mesh(file_path: Path) -> trimesh.Trimesh:
+    """Load GLB/GLTF with Draco support (required for NASA models)."""
+    from pygltflib import GLTF2
+
+    if file_path.suffix.lower() == ".glb":
+        gltf = GLTF2().load_binary(str(file_path))
+    else:
+        gltf = GLTF2().load(str(file_path))
+
+    blob = gltf.binary_blob()
+    if blob is None:
+        raise ValueError(f"No binary payload in {file_path}")
+
+    meshes: list[trimesh.Trimesh] = []
+    scene_index = gltf.scene if gltf.scene is not None else 0
+    root_nodes = gltf.scenes[scene_index].nodes or []
+
+    for node_index in root_nodes:
+        _collect_gltf_node(gltf, blob, node_index, np.eye(4), meshes)
+
+    if not meshes:
+        raise ValueError(f"No geometry found in {file_path}")
+
+    return trimesh.util.concatenate(meshes) if len(meshes) > 1 else meshes[0]
+
+
+def _collect_gltf_node(
+    gltf,
+    blob: bytes,
+    node_index: int,
+    parent_matrix: np.ndarray,
+    meshes: list[trimesh.Trimesh],
+) -> None:
+    node = gltf.nodes[node_index]
+    world_matrix = parent_matrix @ _node_local_matrix(node)
+
+    if node.mesh is not None:
+        gltf_mesh = gltf.meshes[node.mesh]
+        for primitive in gltf_mesh.primitives:
+            piece = _decode_gltf_primitive(gltf, blob, primitive)
+            if piece is None:
+                continue
+            vertices, faces = piece
+            if len(vertices) == 0 or len(faces) == 0:
+                continue
+            homog = np.column_stack([vertices, np.ones(len(vertices))])
+            vertices = (world_matrix @ homog.T).T[:, :3]
+            meshes.append(trimesh.Trimesh(vertices=vertices, faces=faces, process=False))
+
+    for child_index in node.children or []:
+        _collect_gltf_node(gltf, blob, child_index, world_matrix, meshes)
+
+
+def _node_local_matrix(node) -> np.ndarray:
+    if node.matrix:
+        return np.array(node.matrix, dtype=float).reshape(4, 4).T
+
+    matrix = np.eye(4)
+    if node.translation:
+        matrix[:3, 3] = np.asarray(node.translation, dtype=float)
+    if node.rotation:
+        matrix[:3, :3] = _quaternion_to_matrix(node.rotation)
+    if node.scale:
+        scale = np.diag([*node.scale, 1.0])
+        matrix = matrix @ scale
+    return matrix
+
+
+def _quaternion_to_matrix(quat: list[float]) -> np.ndarray:
+    x, y, z, w = quat
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=float,
+    )
+
+
+def _decode_gltf_primitive(gltf, blob: bytes, primitive):
+    extensions = primitive.extensions or {}
+    if "KHR_draco_mesh_compression" in extensions:
+        return _decode_draco_primitive(gltf, blob, primitive)
+
+    if primitive.attributes.POSITION is None:
+        return None
+
+    vertices = _read_accessor(gltf, blob, primitive.attributes.POSITION)
+    faces = _read_faces(gltf, blob, primitive)
+    return vertices, faces
+
+
+def _decode_draco_primitive(gltf, blob: bytes, primitive):
+    import DracoPy
+
+    ext = primitive.extensions["KHR_draco_mesh_compression"]
+    view = gltf.bufferViews[ext["bufferView"]]
+    start = view.byteOffset or 0
+    end = start + view.byteLength
+    decoded = DracoPy.decode(blob[start:end])
+
+    vertices = np.asarray(decoded.points, dtype=float).reshape(-1, 3)
+    faces = np.asarray(decoded.faces, dtype=np.int64).reshape(-1, 3)
+    return vertices, faces
+
+
+def _read_accessor(gltf, blob: bytes, accessor_index: int) -> np.ndarray:
+    accessor = gltf.accessors[accessor_index]
+    view = gltf.bufferViews[accessor.bufferView]
+    start = (view.byteOffset or 0) + (accessor.byteOffset or 0)
+
+    dtype = {
+        5126: np.float32,
+        5123: np.uint16,
+        5125: np.uint32,
+    }[accessor.componentType]
+
+    component_sizes = {5126: 4, 5123: 2, 5125: 4}
+    num_components = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}[accessor.type]
+    count = accessor.count
+    itemsize = component_sizes[accessor.componentType] * num_components
+    data = blob[start : start + count * itemsize]
+    array = np.frombuffer(data, dtype=dtype)
+    return array.reshape(count, num_components) if num_components > 1 else array
+
+
+def _read_faces(gltf, blob: bytes, primitive) -> np.ndarray:
+    if primitive.indices is None:
+        raise ValueError("Non-indexed GLTF primitives are not supported.")
+
+    indices = _read_accessor(gltf, blob, primitive.indices).astype(np.int64).reshape(-1)
+    mode = primitive.mode if primitive.mode is not None else 4
+    if mode == 4:
+        return indices.reshape(-1, 3)
+    if mode == 5:
+        return np.column_stack([indices[0::2], indices[1::2], indices[2::2]])
+    raise ValueError(f"Unsupported GLTF primitive mode: {mode}")
 
 
 def _apply_rotation(
@@ -107,7 +265,10 @@ def _apply_rotation(
 
 def _center_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     mesh = mesh.copy()
-    mesh.vertices -= mesh.centroid
+    center = mesh.centroid
+    if not np.all(np.isfinite(center)):
+        center = 0.5 * (mesh.bounds[0] + mesh.bounds[1])
+    mesh.vertices -= center
     return mesh
 
 
@@ -129,7 +290,6 @@ def _decimate_mesh(mesh: trimesh.Trimesh, max_faces: int) -> trimesh.Trimesh:
             return simplified
     except Exception:
         pass
-    # Fallback: uniform face subsampling for environments without fast-simplification
     stride = max(1, len(mesh.faces) // max_faces)
     keep = mesh.faces[::stride][:max_faces]
     return trimesh.Trimesh(vertices=mesh.vertices, faces=keep, process=False)
@@ -140,10 +300,13 @@ def _repair_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     mesh.remove_infinite_values()
     mesh.remove_unreferenced_vertices()
     mesh.merge_vertices()
-    if not mesh.is_watertight:
-        trimesh.repair.fix_normals(mesh)
-        trimesh.repair.fill_holes(mesh)
-        mesh.remove_unreferenced_vertices()
+    try:
+        if not mesh.is_watertight and len(mesh.faces) < 200_000:
+            trimesh.repair.fix_normals(mesh)
+            trimesh.repair.fill_holes(mesh)
+            mesh.remove_unreferenced_vertices()
+    except Exception:
+        pass
     return mesh
 
 
